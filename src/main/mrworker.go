@@ -10,8 +10,11 @@ package main
 // Please do not change this file.
 //
 
-import "../mr"
-import "plugin"
+//import "../mr"
+import (
+	"../mr"
+	"plugin"
+)
 import "os"
 import "fmt"
 import "log"

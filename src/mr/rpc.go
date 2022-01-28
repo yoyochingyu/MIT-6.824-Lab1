@@ -13,7 +13,6 @@ import "strconv"
 // example to show how to declare the arguments
 // and reply for an RPC.
 //
-
 type ExampleArgs struct {
 	X int
 }
@@ -23,7 +22,15 @@ type ExampleReply struct {
 }
 
 // Add your RPC definitions here.
+type Args struct {
+	ProcessId int
+	Task      *Task
+}
 
+type Reply struct {
+	Task *Task
+	R    int
+}
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the master.

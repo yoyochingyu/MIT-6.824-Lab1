@@ -52,7 +52,7 @@ func nparallel(phase string) int {
 	dd.Close()
 
 	time.Sleep(1 * time.Second)
-
+	fmt.Println(myfilename)
 	err = os.Remove(myfilename)
 	if err != nil {
 		panic(err)
