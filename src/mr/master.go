@@ -12,20 +12,18 @@ import "net/rpc"
 import "net/http"
 
 type Master struct {
-	// Your definitions here.
-	M                    int
-	R                    int
-	idleMap              []*Task // Queue
-	idleReduce           []*Task // Queue
-	mapTasks             map[int]*Task
-	reduceTasks          map[int]*Task
+	M                    int           // # of mapTasks (== pg-*.txt counts)
+	R                    int           // # of reduceTasks
+	idleMap              []*Task       // queue, all idle mapTasks
+	idleReduce           []*Task       // queue, all idle reduceTasks
+	mapTasks             map[int]*Task // all mapTasks
+	reduceTasks          map[int]*Task // all reduceTasks
 	completedMapTasks    int
 	completedReduceTasks int
 	finished             bool
 	mu                   sync.Mutex
 }
 
-// todo: enum
 type Status string
 
 const (
@@ -44,16 +42,18 @@ const (
 )
 
 type Task struct {
-	TaskType       TaskType
-	TaskId         int
-	Status         Status
-	ProcessId      int
-	InputFiles     []string
-	OutputFiles    []string
-	OutputFileSize int
+	TaskType    TaskType
+	TaskId      int
+	Status      Status
+	ProcessId   int
+	InputFiles  []string
+	OutputFiles []string
 }
 
-// todo: worker modification doesn't access by server side
+// monitorTask monitors task and see if it is finished in given time or if it is timeout.
+// if it is, increment completedMapTasks or completedReduceTasks.
+// if not, push the task into idleMap or idleReduce again.
+// monitorTask judges the status of a task based on the execution of CompleteTask.
 func (m *Master) monitorTask(taskId int, taskType TaskType) {
 	time.Sleep(10 * 1000 * time.Millisecond)
 
@@ -65,15 +65,13 @@ func (m *Master) monitorTask(taskId int, taskType TaskType) {
 			task.ProcessId = -1
 			m.idleMap = append(m.idleMap, task)
 		} else {
-			// isCompleted
-			// append each partition to reduceTask
+			// isCompleted, append each partition to reduceTask
 			for i := 0; i < m.R; i++ {
 				file := fmt.Sprintf("mr-%d-%d", task.TaskId, i)
 				m.reduceTasks[i].InputFiles = append(m.reduceTasks[i].InputFiles, file)
 			}
 			m.completedMapTasks++
 		}
-
 	} else {
 		task := m.reduceTasks[taskId]
 		if task.Status != Completed {
@@ -91,11 +89,9 @@ func (m *Master) monitorTask(taskId int, taskType TaskType) {
 	m.mu.Unlock()
 }
 
-// if there are multiple request coming concurrently, there will be multiple handlers be called at the same ime
-// Your code here -- RPC handlers for the worker to call.
+// AssignTask is an RPC handler used to assign task to worker.
 func (m *Master) AssignTask(args *Args, reply *Reply) error {
 	var task *Task
-
 	processId := args.ProcessId
 
 	m.mu.Lock()
@@ -108,40 +104,41 @@ func (m *Master) AssignTask(args *Args, reply *Reply) error {
 
 		task.Status = InProgress
 		task.ProcessId = processId
-
-		// pass m.mapTasks[i] to worker (async callback: assign output files to corresponding reduceTasks, completedMapTasks++, mark as complete
-		// sleep for 10s, if not completed, mark as idle
 		reply.Task = task
 		reply.R = m.R
+
 		go m.monitorTask(task.TaskId, MapTask)
+	} else if m.completedMapTasks != m.M {
+		// we wait until all mapTasks complete before start assigning reduceTask
+		task = &Task{TaskType: Wait}
+		reply.Task = task
+	} else if len(m.idleReduce) != 0 {
+		// assign reduceTask to worker
+
+		// pop a task from the queue and shrink
+		task = m.idleReduce[0]
+		m.idleReduce = m.idleReduce[1:]
+
+		task.Status = InProgress
+		task.ProcessId = processId
+		reply.Task = task
+		reply.R = m.R
+
+		go m.monitorTask(task.TaskId, ReduceTask)
+	} else if m.completedReduceTasks != m.R {
+		// we wait until all reduceTask finish before closing Master
+		task = &Task{TaskType: Wait}
+		reply.Task = task
 	} else {
-		if m.completedMapTasks != m.M {
-			task = &Task{TaskType: Wait}
-			reply.Task = task
-		} else if len(m.idleReduce) != 0 {
-			// assign reduceTask to worker
-			// pop a task from the queue and shrink
-			task = m.idleReduce[0]
-			m.idleReduce = m.idleReduce[1:]
-
-			task.Status = InProgress
-			task.ProcessId = processId
-			reply.Task = task
-			reply.R = m.R
-
-			go m.monitorTask(task.TaskId, ReduceTask)
-		} else if m.completedReduceTasks != m.R {
-			task = &Task{TaskType: Wait}
-			reply.Task = task
-		} else { //if m.completedReduceTasks == m.R
-			task = &Task{TaskType: Exit}
-			reply.Task = task
-		}
+		task = &Task{TaskType: Exit}
+		reply.Task = task
 	}
+
 	m.mu.Unlock()
 	return nil
 }
 
+// CompleteTask is an RPC handler to mark task as completed.
 func (m *Master) CompleteTask(args *Args, reply *Reply) error {
 	m.mu.Lock()
 	task := args.Task
@@ -154,18 +151,7 @@ func (m *Master) CompleteTask(args *Args, reply *Reply) error {
 	return nil
 }
 
-//
-// an example RPC handler.
-// the RPC argument and reply types are defined in rpc.go.
-//
-func (m *Master) Example(args *ExampleArgs, reply *ExampleReply) error {
-	reply.Y = args.X + 1
-	return nil
-}
-
-//
 // start a thread that listens for RPCs from worker.go
-//
 func (m *Master) server() {
 	rpc.Register(m)
 	rpc.HandleHTTP()
@@ -179,14 +165,11 @@ func (m *Master) server() {
 	go http.Serve(l, nil)
 }
 
-//
-// main/mrmaster.go calls Done() periodically to find out
-// if the entire job has finished.
+// main/mrmaster.go calls Done() periodically to find out if the entire job has finished.
 func (m *Master) Done() bool {
 	return m.finished
 }
 
-//
 // create a Master.
 // main/mrmaster.go calls this function.
 // nReduce is the number of reduce tasks to use.
@@ -213,6 +196,7 @@ func MakeMaster(files []string, nReduce int) *Master {
 		m.idleMap = append(m.idleMap, &task)
 		m.mapTasks[i] = &task
 	}
+
 	// create reduceTasks & place in idleReduce & reduceTasks
 	for i := 0; i < m.R; i++ {
 		task := Task{
@@ -226,7 +210,5 @@ func MakeMaster(files []string, nReduce int) *Master {
 	}
 
 	m.server()
-
-	// todo: periodically check if all reduce tasks are done
 	return &m
 }

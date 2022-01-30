@@ -20,18 +20,14 @@ func (a ByKey) Len() int           { return len(a) }
 func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
-//
 // Map functions return a slice of KeyValue.
-//
 type KeyValue struct {
 	Key   string
 	Value string
 }
 
-//
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
-//
 func ihash(key string) int {
 	h := fnv.New32a()
 	h.Write([]byte(key))
@@ -55,18 +51,15 @@ func handleMapTask(task *Task, R int, mapf func(string, string) []KeyValue) {
 	// n == len(task.InputFiles) == # of go routines(mapFunctions) [1 inputFile: 1 mapFunction/goroutine]
 	n := len(task.InputFiles)
 	ch := make(chan []KeyValue, n)
-	//var wg sync.WaitGroup
+
 	for _, filename := range task.InputFiles {
-		//wg.Add(1)
 		go func(filename string) {
-			//defer wg.Done()
-			content := readFile(filename) // todo
+			content := readFile(filename)
 			kva := mapf(filename, content)
 			ch <- kva
 		}(filename)
 	}
 
-	// wg.Wait()
 	// hash each intermediate key & group into partitions
 	// 0th index: reduceTask Index, 1th index: KV pair
 	var partitions [][]KeyValue
@@ -91,6 +84,7 @@ func handleMapTask(task *Task, R int, mapf func(string, string) []KeyValue) {
 		}
 		task.OutputFiles = append(task.OutputFiles, fileName)
 	}
+
 	(*task).Status = Completed
 	args := Args{Task: task}
 	reply := Reply{}
@@ -98,11 +92,11 @@ func handleMapTask(task *Task, R int, mapf func(string, string) []KeyValue) {
 }
 
 func handleReduceTask(task *Task, reducef func(string, []string) string) {
+	// parse inputFiles into intermediate KV pairs
 	var intermediate []KeyValue
 	for _, fileName := range task.InputFiles {
 		f, _ := os.Open(fileName)
 		dec := json.NewDecoder(f)
-
 		for {
 			var kv KeyValue
 			if err := dec.Decode(&kv); err != nil {
@@ -111,14 +105,12 @@ func handleReduceTask(task *Task, reducef func(string, []string) string) {
 			intermediate = append(intermediate, kv)
 		}
 	}
+
 	sort.Sort(ByKey(intermediate))
 	oname := fmt.Sprintf("mr-out-%d", task.TaskId)
 	ofile, _ := os.Create(oname)
 
-	//
-	// call Reduce on each distinct key in intermediate[],
-	// and print the result to mr-out-0.
-	//
+	// group intermediate KV pairs by key, execute reduceFunction
 	i := 0
 	var wg sync.WaitGroup
 	var fileLock sync.Mutex
@@ -131,6 +123,7 @@ func handleReduceTask(task *Task, reducef func(string, []string) string) {
 		for k := i; k < j; k++ {
 			values = append(values, intermediate[k].Value)
 		}
+
 		wg.Add(1)
 		go func(i int, values []string) {
 			defer wg.Done()
@@ -141,6 +134,7 @@ func handleReduceTask(task *Task, reducef func(string, []string) string) {
 		}(i, values)
 		i = j
 	}
+
 	wg.Wait()
 	ofile.Close()
 
@@ -152,20 +146,14 @@ func handleReduceTask(task *Task, reducef func(string, []string) string) {
 	call("Master.CompleteTask", &args, &reply)
 }
 
-//
 // main/mrworker.go calls this function.
-//
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
-
-	// Your worker implementation here.
-
-	// uncomment to send the Example RPC to the master.
-	callMaster(mapf, reducef)
+	requestTask(mapf, reducef)
 
 }
 
-func callMaster(mapf func(string, string) []KeyValue,
+func requestTask(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 	args := Args{ProcessId: os.Getpid()}
 	reply := Reply{}
@@ -181,7 +169,6 @@ func callMaster(mapf func(string, string) []KeyValue,
 	case Wait:
 		fmt.Println("sleep 10 sec ... waiting for all map/reduce tasks completed")
 		time.Sleep(10 * 1000 * time.Millisecond)
-
 	case MapTask:
 		handleMapTask(task, R, mapf)
 		fmt.Printf("Map Task %d finished within %v\n", task.TaskId, time.Since(start))
@@ -189,14 +176,12 @@ func callMaster(mapf func(string, string) []KeyValue,
 		handleReduceTask(task, reducef)
 		fmt.Printf("Reduce Task %d finished within %v\n", task.TaskId, time.Since(start))
 	}
-	callMaster(mapf, reducef)
+	requestTask(mapf, reducef)
 }
 
-//
 // send an RPC request to the master, wait for the response.
 // usually returns true.
 // returns false if something goes wrong.
-//
 func call(rpcname string, args interface{}, reply interface{}) bool {
 	// c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
 	sockname := masterSock()
