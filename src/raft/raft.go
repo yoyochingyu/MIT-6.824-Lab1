@@ -94,9 +94,11 @@ var (
 type ChanArg string
 
 var (
-	RestartTimer   ChanArg = "RESTART_TIMER"
-	Timeout        ChanArg = "TIMEOUT"
-	ChangeToLeader ChanArg = "CHANGE_TO_LEADER"
+	RestartTimer     ChanArg = "RESTART_TIMER"
+	Timeout          ChanArg = "TIMEOUT"
+	ChangeToLeader   ChanArg = "CHANGE_TO_LEADER"
+	ChangeToFollower ChanArg = "CHANGE_TO_FOLLOWER"
+	Vote             ChanArg = "VOTE"
 )
 
 // return currentTerm and whether this server
@@ -172,35 +174,70 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
-func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) { // todo
 	// Your code here (2A, 2B).
 	term, candidateId, _, _ := args.Term, args.CandidateId, args.LastLogIndex, args.LastLogTerm
 
-	rf.mu.Lock() //todo
+	rf.mu.Lock()
 	if term < rf.currentTerm {
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
-	} else if term > rf.currentTerm {
-		// restart timer
-		rf.timerCh <- RestartTimer // todo: candidate, leader on't have this?
+		rf.mu.Unlock()
+		return
+	}
 
-		rf.changeToFollower(term)
+	// change state
+	if term > rf.currentTerm {
+		if rf.state == Follower {
+			rf.changeToFollower(term)
+			rf.timerCh <- RestartTimer
+			// todo: vote/checkvote
+		} else if rf.state == Candidate || rf.state == Leader {
+			rf.changeToFollower(term)
+			go rf.monitorHeartbeat() // todo: will this have the ones remaining when last time as follower?
+			// todo: vote/checkvote
+		}
+
+	} else {
+		if rf.state == Follower {
+			rf.timerCh <- RestartTimer // todo: candidate, leader don't have this?
+		}
+	}
+	// check can I vote this guy
+	if rf.votedFor == NULL || rf.votedFor == candidateId {
 		rf.votedFor = candidateId
 		reply.VoteGranted = true
 		log.Printf("[Server %d] votes for %d\n", rf.me, candidateId)
-	} else {
-		// restart timer
-		rf.timerCh <- RestartTimer // todo: candidate, leader don't have this?
-
-		if rf.votedFor == NULL || rf.votedFor == candidateId { // todo: leader?
-			rf.votedFor = candidateId
-			reply.VoteGranted = true
-			log.Printf("[Server %d] votes for %d\n", rf.me, candidateId)
-		} else {
-			reply.VoteGranted = false
-		}
-
+	} else { // todo: check
+		reply.VoteGranted = false
 	}
+	// todo: leader may recv!
+	//todo: votedFor set as null!
+
+	// original
+	//if term > rf.currentTerm {
+	//	// restart timer
+	//	rf.timerCh <- RestartTimer // todo: candidate, leader on't have this?
+	//
+	//	rf.changeToFollower(term)
+	//	//go rf.monitorHeartbeat() //todo: prob?
+	//
+	//	rf.votedFor = candidateId
+	//	reply.VoteGranted = true
+	//	log.Printf("[Server %d] votes for %d\n", rf.me, candidateId)
+	//} else {
+	//	// restart timer
+	//	rf.timerCh <- RestartTimer // todo: candidate, leader don't have this?
+	//
+	//	if rf.votedFor == NULL || rf.votedFor == candidateId { // todo: leader?
+	//		rf.votedFor = candidateId
+	//		reply.VoteGranted = true
+	//		log.Printf("[Server %d] votes for %d\n", rf.me, candidateId)
+	//	} else {
+	//		reply.VoteGranted = false
+	//	}
+	//
+	//}
 	rf.mu.Unlock()
 }
 
@@ -241,13 +278,47 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.mu.Unlock()
 		return
 	}
-	if term > rf.currentTerm || rf.state == Candidate {
-		rf.changeToFollower(term)
+	if rf.state == Follower {
+		rf.timerCh <- RestartTimer
+	} else if rf.state == Candidate {
+		go rf.monitorHeartbeat() // todo: will this have the ones remaining when last time as follower?
 	}
-	if rf.state != Leader {
-		rf.leaderId = leaderId
-		rf.timerCh <- RestartTimer // todo: position? leader/follower
-	}
+	rf.changeToFollower(term)
+	rf.leaderId = leaderId
+
+	// detailed version
+	//if term > rf.currentTerm{
+	//	if rf.state == Follower{
+	//		rf.changeToFollower(term)
+	//		rf.leaderId = leaderId
+	//		rf.timerCh <- RestartTimer
+	//	}else if rf.state == Candidate{
+	//		rf.changeToFollower(term)
+	//		rf.leaderId = leaderId
+	//		go rf.monitorHeartbeat() // todo: will this have the ones remaining when last time as follower?
+	//	}
+	//	// leader won't send AE to self
+	//}else if term == rf.currentTerm{
+	//	if rf.state == Follower{
+	//		rf.leaderId = leaderId
+	//		rf.timerCh <- RestartTimer
+	//	}else if rf.state == Candidate{
+	//		rf.changeToFollower(term)
+	//		rf.leaderId = leaderId
+	//		go rf.monitorHeartbeat() // todo: will this have the ones remaining when last time as follower?
+	//	}
+	// todo: leader won't send AE to self
+	//}
+	//
+
+	// original version
+	//if term > rf.currentTerm || rf.state == Candidate {
+	//	rf.changeToFollower(term)
+	//}
+	//if rf.state != Leader {
+	//	rf.leaderId = leaderId
+	//	rf.timerCh <- RestartTimer // todo: position? leader/follower
+	//}
 	rf.mu.Unlock()
 }
 
@@ -260,58 +331,54 @@ func (rf *Raft) changeToFollower(term int) {
 	log.Printf("[Server %d] state: follower, currentTerm: %d, votedFor: NULL\n", rf.me, rf.currentTerm)
 }
 
-func (rf *Raft) issueHeartbeat() {
+func (rf *Raft) issueOneHeartbeat(i int) {
+	// wrap arg, reply
+	rf.mu.Lock()
+	arg := AppendEntriesArgs{
+		Term:         rf.currentTerm,
+		LeaderId:     rf.me,
+		PrevLogIndex: NULL,
+		PrevLogTerm:  NULL,
+		Entries:      []LogEntry{},
+		LeaderCommit: NULL,
+	}
+	rf.mu.Unlock()
+	reply := AppendEntriesReply{}
 
-	for i := range rf.peers {
-		go func(i int) {
+	// send heartbeat
+	log.Printf("heartbeat sends to server: %d\n", i)
+	rf.sendAppendEntries(i, &arg, &reply)
 
-			rf.mu.Lock() // possible
+	// handle response
+	term, success := reply.Term, reply.Success
 
-			log.Printf("heartbeat sends to server: %d\n", i)
-			arg := AppendEntriesArgs{
-				Term:         rf.currentTerm,
-				LeaderId:     rf.me,
-				PrevLogIndex: NULL,
-				PrevLogTerm:  NULL,
-				Entries:      []LogEntry{},
-				LeaderCommit: NULL,
-			}
-
-			rf.mu.Unlock()
-			reply := AppendEntriesReply{}
-
-			rf.sendAppendEntries(i, &arg, &reply)
-
-			// handle response from votes
-			term, success := reply.Term, reply.Success
-
-			if !success {
-				rf.mu.Lock()
-				if term > rf.currentTerm {
-					log.Printf("resp term > current term, go back to follower")
-					rf.changeToFollower(term)
-
-				} else {
-					// reply false if log doesn't contain an entry at prevLogIndex whose term matches prevLogTerm
-				}
-				rf.mu.Unlock()
-			}
-
-		}(i)
+	if !success {
+		rf.mu.Lock()
+		if term > rf.currentTerm {
+			log.Printf("resp term > current term, go back to follower")
+			rf.changeToFollower(term)
+			go rf.monitorHeartbeat()
+		} else {
+			// reply false if log doesn't contain an entry at prevLogIndex whose term matches prevLogTerm
+		}
+		rf.mu.Unlock()
 	}
 }
 
-func (rf *Raft) changeToLeader() {
+func (rf *Raft) issueHeartbeat() {
 	rf.mu.Lock()
 	rf.leaderId = rf.me
-	rf.votedFor = NULL //todo: myself?
 	rf.state = Leader
 	rf.mu.Unlock()
 
 	for rf.state == Leader && !rf.killed() {
 		log.Printf("leader issuing heatbeat...\n")
-		go rf.issueHeartbeat()             // todo: go?
-		time.Sleep(100 * time.Millisecond) // todo:
+		for i := range rf.peers {
+			if i != rf.me {
+				go rf.issueOneHeartbeat(i)
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
@@ -386,6 +453,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.leaderId = NULL //todo: may have problem if client request come at this time
 	rf.votedFor = NULL
 	rf.timerCh = make(chan ChanArg)
+	rf.electCh = make(chan ChanArg, len(rf.peers)+1)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -395,7 +463,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	return rf
 }
 
-func (rf *Raft) startTimer(quit chan ChanArg) {
+func (rf *Raft) startTimer(quit chan ChanArg, ch chan ChanArg) {
 	dur := time.Duration(rand.Intn(200)+200) * time.Millisecond
 	time.Sleep(dur)
 	select {
@@ -405,7 +473,7 @@ func (rf *Raft) startTimer(quit chan ChanArg) {
 		return
 	default:
 		log.Printf("timeout by %d, %p", rf.me, quit)
-		rf.timerCh <- Timeout // todo: ptr
+		ch <- Timeout // todo: ptr
 	}
 }
 
@@ -417,7 +485,7 @@ func (rf *Raft) monitorHeartbeat() {
 
 	quit := make(chan ChanArg, 1)
 	fmt.Printf("start timer, quit is %p, I'm %d\n", quit, rf.me)
-	go rf.startTimer(quit)
+	go rf.startTimer(quit, rf.timerCh)
 
 	for {
 		arg := <-rf.timerCh
@@ -426,73 +494,84 @@ func (rf *Raft) monitorHeartbeat() {
 			log.Printf("[Heartbeat] server (id: %d) recv RPC, restart timer", rf.me)
 			quit = make(chan ChanArg, 1)
 			fmt.Printf("start timer, quit is %p, I'm %d\n", quit, rf.me)
-			go rf.startTimer(quit)
+			go rf.startTimer(quit, rf.timerCh)
 		} else {
 			log.Printf("[Heartbeat] server (id: %d) timeout, changed to candidate and start election", rf.me)
-			rf.mu.Lock()
-			rf.state = Candidate
-			rf.mu.Unlock()
 			go rf.startElection()
 			return
 		}
 	}
 }
 
-func (rf *Raft) startElection() {
+func (rf *Raft) issueOneReqVote(i int) {
 
+	// wrap arg, reply,
 	rf.mu.Lock()
-	rf.currentTerm = rf.currentTerm + 1
-	rf.votedFor = rf.me
-	rf.mu.Unlock()
-
-	rf.electCh = make(chan ChanArg, 1)
-	go rf.startTimer(rf.electCh)
-
-	// issue requestVote concurrently
-	voteChan := make(chan int, len(rf.peers)/2)
-	for i := range rf.peers {
-		if i == rf.me {
-			continue
-		}
-		go func(i int) {
-
-			rf.mu.Lock()
-			arg := RequestVoteArgs{
-				Term:         rf.currentTerm,
-				CandidateId:  rf.me,
-				LastLogIndex: NULL,
-				LastLogTerm:  NULL,
-			}
-			rf.mu.Unlock()
-			reply := RequestVoteReply{}
-			log.Printf("[RequestVote] server (id: %d) ask server (id: %d) to vote, term: %d", rf.me, i, rf.currentTerm)
-			rf.sendRequestVote(i, &arg, &reply)
-
-			// handle response from votes
-			term, voteGranted := reply.Term, reply.VoteGranted
-
-			rf.mu.Lock()
-			if rf.state == Candidate {
-				if !voteGranted && term > rf.currentTerm {
-					rf.changeToFollower(term) // todo: will one response change back to follower, and the other response comes in and tells it to become follower
-					//votesRecv = 0
-				} else if voteGranted {
-					voteChan <- 1
-					if len(voteChan) == cap(voteChan) {
-						rf.electCh <- ChangeToLeader
-					}
-				}
-			}
-			rf.mu.Unlock()
-		}(i)
+	arg := RequestVoteArgs{
+		Term:         rf.currentTerm,
+		CandidateId:  rf.me,
+		LastLogIndex: NULL,
+		LastLogTerm:  NULL,
 	}
+	rf.mu.Unlock()
+	reply := RequestVoteReply{}
 
-	res := <-rf.electCh
-	if res == ChangeToLeader {
-		log.Printf("server %d change to be leader\n", rf.me)
-		rf.changeToLeader()
-	} else if res == Timeout {
-		rf.startElection()
+	// send reqVote
+	log.Printf("[RequestVote] server (id: %d) ask server (id: %d) to vote, term: %d", rf.me, i, rf.currentTerm)
+	rf.sendRequestVote(i, &arg, &reply)
+
+	// handle response
+	term, voteGranted := reply.Term, reply.VoteGranted
+	rf.mu.Lock()
+	if rf.state == Candidate {
+		if !voteGranted && term > rf.currentTerm {
+			rf.changeToFollower(term)
+			go rf.monitorHeartbeat()
+			rf.electCh <- ChangeToFollower // use to shut down startElection goroutine
+		} else if voteGranted {
+			rf.electCh <- Vote
+		}
+	}
+	rf.mu.Unlock()
+}
+
+func (rf *Raft) startElection() {
+	for {
+		// update term, vote for self, change to candidate
+		rf.mu.Lock()
+		rf.state = Candidate
+		rf.currentTerm = rf.currentTerm + 1
+		rf.votedFor = rf.me
+		rf.mu.Unlock()
+
+		// fire timer
+		quit := make(chan ChanArg, 1)
+		go rf.startTimer(quit, rf.electCh)
+
+		// fire reqVote
+		for i := range rf.peers {
+			if i != rf.me {
+				go rf.issueOneReqVote(i) // todo: rename
+			}
+		}
+
+		// wait for signal
+		votes := 0
+		for arg := range rf.electCh {
+			if arg == Vote { // todo: rename
+				votes++
+				if votes == len(rf.peers)/2 {
+					log.Printf("server %d change to be leader\n", rf.me)
+					go rf.issueHeartbeat()
+					return
+				}
+			} else if arg == Timeout {
+				log.Println("election timeout, restart election")
+				break
+			} else if arg == ChangeToFollower {
+				return
+			}
+		}
 	}
 
 }
