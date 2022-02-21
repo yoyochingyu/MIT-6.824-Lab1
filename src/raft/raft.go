@@ -29,6 +29,12 @@ import "../labrpc"
 func init() {
 	rand.Seed(time.Now().UnixNano())
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
+	//f, err := os.OpenFile("testlogfile", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0777)
+	//if err != nil {
+	//	log.Fatalf("error opening file: %v", err)
+	//}
+	//defer f.Close()
+	//log.SetOutput(f)
 }
 
 // import "bytes"
@@ -284,8 +290,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.mu.Unlock()
 		return
 	}
-	rf.changeToFollower(term)
-	rf.leaderId = leaderId
+	if term == rf.currentTerm && rf.state == Leader {
+		reply.Success = true
+		rf.mu.Unlock()
+		return
+	}
 
 	if rf.state == Follower {
 		rf.timerCh <- RestartTimer
@@ -294,8 +303,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.votedFor = leaderId         //todo:?????????
 		go rf.monitorHeartbeat()       // todo: will this have the ones remaining when last time as follower?
 		rf.electCh <- ChangeToFollower // use to shut down startElection goroutine
+	} else if rf.state == Leader {
+		rf.votedFor = leaderId   //todo:?????????
+		go rf.monitorHeartbeat() // todo: will this have the ones remaining when last time as follower?
 	}
-
+	rf.changeToFollower(term)
+	rf.leaderId = leaderId
+	reply.Success = true
 	// detailed version
 	//if term > rf.currentTerm{
 	//	if rf.state == Follower{
@@ -387,9 +401,7 @@ func (rf *Raft) issueHeartbeat() {
 	for rf.state == Leader && !rf.killed() {
 		log.Printf("[IssueHB] leader (id: %d) issuing heatbeat\n", rf.me)
 		for i := range rf.peers {
-			if i != rf.me {
-				go rf.issueOneHeartbeat(i)
-			}
+			go rf.issueOneHeartbeat(i)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -550,6 +562,8 @@ func (rf *Raft) startElection() {
 		rf.state = Candidate
 		rf.currentTerm = rf.currentTerm + 1
 		rf.votedFor = rf.me
+		// clear electCh, to prevent counting votes from previous round // todo
+		rf.electCh = make(chan ChanArg, len(rf.peers)+1)
 		rf.mu.Unlock()
 
 		// fire timer
@@ -558,9 +572,7 @@ func (rf *Raft) startElection() {
 
 		// fire reqVote
 		for i := range rf.peers {
-			if i != rf.me {
-				go rf.issueOneReqVote(i) // todo: rename
-			}
+			go rf.issueOneReqVote(i) // todo: rename
 		}
 
 		// wait for signal
@@ -568,13 +580,14 @@ func (rf *Raft) startElection() {
 		for arg := range rf.electCh {
 			if arg == Vote { // todo: rename
 				votes++
-				if votes == len(rf.peers)/2 {
+				if votes == len(rf.peers)/2+1 {
+					quit <- "QUIT"
 					log.Printf("[WinElection] server %d change to be leader\n", rf.me)
 					go rf.issueHeartbeat()
 					return
 				}
 			} else if arg == Timeout {
-				log.Println("[Election] election timeout, restart election")
+				log.Printf("[Election] server (id: %d)election timeout, restart election\n", rf.me)
 				break
 			} else if arg == ChangeToFollower {
 				return
