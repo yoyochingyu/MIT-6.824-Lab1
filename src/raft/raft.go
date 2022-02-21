@@ -18,7 +18,6 @@ package raft
 //
 
 import (
-	"fmt"
 	"log"
 	"math/rand"
 	"sync"
@@ -182,6 +181,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) { //
 	if term < rf.currentTerm {
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
+		log.Printf("[RefuseVote] server (id: %d) term > candidate (id: %d) term\n", rf.me, candidateId)
 		rf.mu.Unlock()
 		return
 	}
@@ -189,12 +189,15 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) { //
 	// change state
 	if term > rf.currentTerm {
 		if rf.state == Follower {
-			rf.changeToFollower(term)
+			rf.changeToFollower(term) // todo: log
+			rf.votedFor = NULL
 			rf.timerCh <- RestartTimer
 			// todo: vote/checkvote
 		} else if rf.state == Candidate || rf.state == Leader {
 			rf.changeToFollower(term)
+			rf.votedFor = NULL
 			go rf.monitorHeartbeat() // todo: will this have the ones remaining when last time as follower?
+
 			// todo: vote/checkvote
 		}
 
@@ -207,12 +210,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) { //
 	if rf.votedFor == NULL || rf.votedFor == candidateId {
 		rf.votedFor = candidateId
 		reply.VoteGranted = true
-		log.Printf("[Server %d] votes for %d\n", rf.me, candidateId)
+		log.Printf("[GrantVote] server (id: %d) votes for candidate (id: %d)\n", rf.me, candidateId)
 	} else { // todo: check
 		reply.VoteGranted = false
+		log.Printf("[RefuseVote] server (id: %d) already votes for term: %d\n", rf.me, rf.currentTerm)
 	}
 	// todo: leader may recv!
 	//todo: votedFor set as null!
+	// todo: has to issueHB and ReqVote to self
 
 	// original
 	//if term > rf.currentTerm {
@@ -265,6 +270,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	return ok
 }
 
+// todo: votedFor
 // face to leader(self), follower, candidate
 // AppendEntries is the handler for sendAppendEntries
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -278,13 +284,17 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.mu.Unlock()
 		return
 	}
+	rf.changeToFollower(term)
+	rf.leaderId = leaderId
+
 	if rf.state == Follower {
 		rf.timerCh <- RestartTimer
 	} else if rf.state == Candidate {
-		go rf.monitorHeartbeat() // todo: will this have the ones remaining when last time as follower?
+		//todo: does this implicityly means voting to this leader????????? (set votedFor)
+		rf.votedFor = leaderId         //todo:?????????
+		go rf.monitorHeartbeat()       // todo: will this have the ones remaining when last time as follower?
+		rf.electCh <- ChangeToFollower // use to shut down startElection goroutine
 	}
-	rf.changeToFollower(term)
-	rf.leaderId = leaderId
 
 	// detailed version
 	//if term > rf.currentTerm{
@@ -325,10 +335,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 // changeToFollower updates term, set state follower, . requires locking mechanism
 // todo: timer restart timer
 func (rf *Raft) changeToFollower(term int) {
+	log.Printf("[System] server (id: %d) state: %s, term: %d->%d\n", rf.me, Follower, rf.currentTerm, term)
+	//log.Printf("[System] server (id: %d) state: %s -> %s, term: %d->%d\n", rf.me, "RE",Follower, rf.currentTerm, term, )
 	rf.currentTerm = term
-	//rf.votedFor = NULL
+	//rf.votedFor = NULL // shouldn't,
 	rf.state = Follower
-	log.Printf("[Server %d] state: follower, currentTerm: %d, votedFor: NULL\n", rf.me, rf.currentTerm)
+
 }
 
 func (rf *Raft) issueOneHeartbeat(i int) {
@@ -346,7 +358,7 @@ func (rf *Raft) issueOneHeartbeat(i int) {
 	reply := AppendEntriesReply{}
 
 	// send heartbeat
-	log.Printf("heartbeat sends to server: %d\n", i)
+	log.Printf("[IssueHB] leader (id: %d) issue heatbeat to %d\n", rf.me, i)
 	rf.sendAppendEntries(i, &arg, &reply)
 
 	// handle response
@@ -355,8 +367,9 @@ func (rf *Raft) issueOneHeartbeat(i int) {
 	if !success {
 		rf.mu.Lock()
 		if term > rf.currentTerm {
-			log.Printf("resp term > current term, go back to follower")
+			log.Printf("[IssueHB] leader (id: %d) resp term > current term, go back to follower", rf.me)
 			rf.changeToFollower(term)
+			rf.votedFor = NULL
 			go rf.monitorHeartbeat()
 		} else {
 			// reply false if log doesn't contain an entry at prevLogIndex whose term matches prevLogTerm
@@ -372,7 +385,7 @@ func (rf *Raft) issueHeartbeat() {
 	rf.mu.Unlock()
 
 	for rf.state == Leader && !rf.killed() {
-		log.Printf("leader issuing heatbeat...\n")
+		log.Printf("[IssueHB] leader (id: %d) issuing heatbeat\n", rf.me)
 		for i := range rf.peers {
 			if i != rf.me {
 				go rf.issueOneHeartbeat(i)
@@ -457,8 +470,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-	log.Printf("server (id: %d) created, term: %d\n", rf.me, rf.currentTerm)
-	log.Printf("server (id: %d) starts monitor heartbeat\n", rf.me)
+	log.Printf("[System] server (id: %d) created, term: %d\n", rf.me, rf.currentTerm)
 	go rf.monitorHeartbeat()
 	return rf
 }
@@ -468,11 +480,8 @@ func (rf *Raft) startTimer(quit chan ChanArg, ch chan ChanArg) {
 	time.Sleep(dur)
 	select {
 	case <-quit:
-		log.Println("Received quit")
-		log.Printf("recv quit by %d, %p", rf.me, quit)
 		return
 	default:
-		log.Printf("timeout by %d, %p", rf.me, quit)
 		ch <- Timeout // todo: ptr
 	}
 }
@@ -482,21 +491,19 @@ func (rf *Raft) monitorHeartbeat() {
 	//	return
 	//}
 	// 2A
-
+	log.Printf("[MonitorHB] server (id: %d) starts monitor heartbeat\n", rf.me)
 	quit := make(chan ChanArg, 1)
-	fmt.Printf("start timer, quit is %p, I'm %d\n", quit, rf.me)
 	go rf.startTimer(quit, rf.timerCh)
 
-	for {
+	for !rf.killed() {
 		arg := <-rf.timerCh
 		if arg == RestartTimer {
 			quit <- "QUIT"
-			log.Printf("[Heartbeat] server (id: %d) recv RPC, restart timer", rf.me)
+			log.Printf("[MonitorHB] server (id: %d) recv RPC, restart timer", rf.me)
 			quit = make(chan ChanArg, 1)
-			fmt.Printf("start timer, quit is %p, I'm %d\n", quit, rf.me)
 			go rf.startTimer(quit, rf.timerCh)
 		} else {
-			log.Printf("[Heartbeat] server (id: %d) timeout, changed to candidate and start election", rf.me)
+			log.Printf("[MonitorHB] server (id: %d) timeout, changed to candidate and start election", rf.me)
 			go rf.startElection()
 			return
 		}
@@ -517,7 +524,7 @@ func (rf *Raft) issueOneReqVote(i int) {
 	reply := RequestVoteReply{}
 
 	// send reqVote
-	log.Printf("[RequestVote] server (id: %d) ask server (id: %d) to vote, term: %d", rf.me, i, rf.currentTerm)
+	log.Printf("[Election] server (id: %d) ask server (id: %d) to vote, term: %d", rf.me, i, rf.currentTerm)
 	rf.sendRequestVote(i, &arg, &reply)
 
 	// handle response
@@ -526,6 +533,7 @@ func (rf *Raft) issueOneReqVote(i int) {
 	if rf.state == Candidate {
 		if !voteGranted && term > rf.currentTerm {
 			rf.changeToFollower(term)
+			rf.votedFor = NULL
 			go rf.monitorHeartbeat()
 			rf.electCh <- ChangeToFollower // use to shut down startElection goroutine
 		} else if voteGranted {
@@ -536,7 +544,7 @@ func (rf *Raft) issueOneReqVote(i int) {
 }
 
 func (rf *Raft) startElection() {
-	for {
+	for !rf.killed() {
 		// update term, vote for self, change to candidate
 		rf.mu.Lock()
 		rf.state = Candidate
@@ -561,12 +569,12 @@ func (rf *Raft) startElection() {
 			if arg == Vote { // todo: rename
 				votes++
 				if votes == len(rf.peers)/2 {
-					log.Printf("server %d change to be leader\n", rf.me)
+					log.Printf("[WinElection] server %d change to be leader\n", rf.me)
 					go rf.issueHeartbeat()
 					return
 				}
 			} else if arg == Timeout {
-				log.Println("election timeout, restart election")
+				log.Println("[Election] election timeout, restart election")
 				break
 			} else if arg == ChangeToFollower {
 				return
