@@ -18,6 +18,7 @@ package raft
 //
 
 import (
+	"fmt"
 	"log"
 	"math"
 	"math/rand"
@@ -174,13 +175,14 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
 	index = len(rf.log)
 	term = rf.currentTerm
 	isLeader = rf.state == Leader
-	if isLeader {
-		rf.leaderCh <- RestartTimer
-		rf.log = append(rf.log, LogEntry{Index: index, Term: term, Command: command})
-		log.Printf("[System] leader (id: %d) recv client req, append to log index: %d\n", rf.me, index)
-		log.Println(command)
-	}
 	rf.mu.Unlock()
+	if isLeader {
+		rf.mu.Lock() // todo:????
+		rf.log = append(rf.log, LogEntry{Index: index, Term: term, Command: command})
+		rf.mu.Unlock()
+		log.Printf("[System] leader (id: %d) recv client req, append to log index: %d, command: %v\n", rf.me, index, command)
+		rf.leaderCh <- RestartTimer
+	}
 	return
 }
 
@@ -449,7 +451,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.mu.Unlock()
 	}
 
-	// update commitIndex
+	// update commitIndex // todo:check
 	rf.mu.Lock()
 	if leaderCommit > rf.commitIdx {
 		min := math.Min(float64(leaderCommit), float64(rf.log[len(rf.log)-1].Index))
@@ -466,7 +468,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 			log.Printf("[AE] server (id: %d) applies index: %d~%d, updates lastApplied to %d\n", rf.me, start, end-1, rf.lastApplied)
 		}
-
+		fmt.Println(rf.log)
 	}
 	rf.mu.Unlock()
 
@@ -652,12 +654,13 @@ func (rf *Raft) startElection() {
 ** Leader: issueHB
 *****************************************************/
 func (rf *Raft) issueOneHeartbeat(i int, isHeartbeat bool) { // todo: create AEType enum
-	// wrap arg, reply
-	rf.mu.Lock()
+	// wrap arg, ply
+	rf.mu.Lock() // tod
 	if rf.state != Leader {
 		rf.mu.Unlock()
 		return
 	}
+	nextIndex := rf.nextIndex[i]
 	prevLogIndex := rf.nextIndex[i] - 1
 	arg := AppendEntriesArgs{
 		Term:         rf.currentTerm,
@@ -694,14 +697,19 @@ func (rf *Raft) issueOneHeartbeat(i int, isHeartbeat bool) { // todo: create AET
 	if !success {
 		rf.mu.Lock()
 		if term > rf.currentTerm {
-			log.Printf("[IssueHB] leader (id: %d) resp term > current term, go back to follower", rf.me)
-			rf.changeToFollower(term)
-			rf.votedFor = NULL
-			go rf.monitorHeartbeat()
-			rf.leaderCh <- ChangeToFollower
+			if rf.state == Leader {
+				log.Printf("[IssueHB] leader (id: %d) resp term > current term, go back to follower", rf.me)
+				rf.changeToFollower(term)
+				rf.votedFor = NULL
+				go rf.monitorHeartbeat()
+				rf.leaderCh <- ChangeToFollower
+			} else {
+				rf.mu.Unlock()
+				return
+			}
 		} else {
 			// log inconsistency
-			rf.nextIndex[i] = rf.nextIndex[i] - 1
+			rf.nextIndex[i] = nextIndex - 1
 			// retry
 			go rf.issueOneHeartbeat(i, isHeartbeat) // <----todo: can remove isHeartBeat
 			rf.mu.Unlock()
@@ -711,7 +719,9 @@ func (rf *Raft) issueOneHeartbeat(i int, isHeartbeat bool) { // todo: create AET
 	} else {
 		if !isHeartbeat {
 			rf.mu.Lock()
-			rf.nextIndex[i] = rf.nextIndex[i] + len(arg.Entries)
+			// todo: succeed means that it finds the last matched and attach all entries to it
+			// we can't just say nextIdx = len(rf.log), bcuz leader may have append a new log entry
+			rf.nextIndex[i] = nextIndex + len(arg.Entries)
 			rf.matchIndex[i] = rf.nextIndex[i] - 1
 			log.Printf("[IssueAE] AE to %d succeeds,update nextIdx: %d, matchIdx: %d", i, rf.nextIndex[i], rf.matchIndex[i])
 			rf.mu.Unlock()
@@ -754,18 +764,20 @@ func (rf *Raft) issueHeartbeat() { // todo: rename
 		} else if arg == ChangeToFollower {
 			return
 		}
+
 		for i := range rf.peers {
-			go rf.issueOneHeartbeat(i, isHeartbeat) // todo: rename
+			go rf.issueOneHeartbeat(i, isHeartbeat) // todo: rename // lock here?
 			//go rf.issueOneHeartbeat(i) // todo: rename
 		}
 		quit = make(chan ChanArg, 1)
 		go rf.startTimer(quit, rf.leaderCh, true)
-
 		// update commitIdx // todo: check (thread?) // todo: uncomment
 
 		rf.mu.Lock()
+		fmt.Println("Updating commitIdx")
 		stat := make([]int, len(rf.log))
-		for _, s := range rf.matchIndex {
+		for i, s := range rf.matchIndex {
+			fmt.Printf("ocunt stat, server: %d, matchOdx: %d\n", i, s)
 			stat[s]++
 		}
 
@@ -779,7 +791,7 @@ func (rf *Raft) issueHeartbeat() { // todo: rename
 				break
 			}
 		}
-		log.Printf("[Commit] Leader update commitIdx as %d\n", rf.commitIdx)
+		log.Printf("[Commit] Leader (id: %d) update commitIdx as %d\n", rf.me, rf.commitIdx)
 		// todo: this is entirely same as AE, but leader doesn't go thru AE so here is it!
 		if rf.commitIdx > rf.lastApplied {
 			start := rf.lastApplied + 1
