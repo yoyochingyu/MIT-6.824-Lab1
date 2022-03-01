@@ -31,12 +31,6 @@ import "../labrpc"
 func init() {
 	rand.Seed(time.Now().UnixNano())
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
-	//f, err := os.OpenFile("testlogfile", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0777)
-	//if err != nil {
-	//	log.Fatalf("error opening file: %v", err)
-	//}
-	//defer f.Close()
-	//log.SetOutput(f)
 }
 
 //
@@ -57,7 +51,7 @@ type ApplyMsg struct {
 }
 
 type LogEntry struct {
-	Command interface{} // todo: uppercase
+	Command interface{}
 	Index   int
 	Term    int
 }
@@ -73,44 +67,41 @@ type Raft struct {
 	me        int                 // this peer's index into peers[]
 	dead      int32               // set by Kill()
 
-	// Your data here (2A, 2B, 2C).
-	// Look at the paper's Figure 2 for a description of what
-	// state a Raft server must maintain.
 	// 2A
-	state       State
+	state       state
 	currentTerm int
-	votedFor    int        // candidateId that received my vote at this term
-	log         []LogEntry // todo: ptr
-	timerCh     chan ChanArg
-	electCh     chan ChanArg
-	leaderCh    chan ChanArg
+	votedFor    int // candidateId that received my vote at this term
+	log         []LogEntry
+	timerCh     chan chanArg // todo: rename
+	electCh     chan chanArg // todo: rename
+	leaderCh    chan chanArg // todo: rename
 
 	// 2B
-	commitIdx   int
+	commitIndex int
 	lastApplied int
 	nextIndex   []int
 	matchIndex  []int
 	applyCh     chan ApplyMsg
 }
 
-var NULL int = -1
+var NULL = -1
 
-type State string
+type state string
 
 var (
-	Follower  State = "FOLLOWER"
-	Candidate State = "CANDIDATE"
-	Leader    State = "LEADER"
+	Follower  state = "FOLLOWER" // todo: capital case?
+	Candidate state = "CANDIDATE"
+	Leader    state = "LEADER"
 )
 
-type ChanArg string
+type chanArg string
 
 var (
-	RestartTimer     ChanArg = "RESTART_TIMER"
-	Timeout          ChanArg = "TIMEOUT"
-	ChangeToFollower ChanArg = "CHANGE_TO_FOLLOWER"
-	Vote             ChanArg = "VOTE"
-	QuitTimer        ChanArg = "QUIT_TIMER"
+	RestartTimer     chanArg = "RESTART_TIMER" // todo: capital case?
+	Timeout          chanArg = "TIMEOUT"
+	ChangeToFollower chanArg = "CHANGE_TO_FOLLOWER" // todo
+	Vote             chanArg = "VOTE"               // todo
+	QuitTimer        chanArg = "QUIT_TIMER"
 )
 
 //
@@ -133,23 +124,25 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
 	// 2A
-	rf.mu = sync.Mutex{} // todo: ptr
+	rf.mu = sync.Mutex{}
 	rf.state = Follower
 	rf.currentTerm = 0
 	rf.votedFor = NULL
-	rf.timerCh = make(chan ChanArg)                  // todo: rename
-	rf.electCh = make(chan ChanArg, len(rf.peers)+1) // +1: space for timer arg
-	rf.leaderCh = make(chan ChanArg)                 // todo: rename
+	rf.timerCh = make(chan chanArg)                  // todo: merge into one channel?
+	rf.electCh = make(chan chanArg, len(rf.peers)+1) // +1: space for timer arg
+	rf.leaderCh = make(chan chanArg)
 
 	// 2B
-	rf.commitIdx = 0
+	rf.commitIndex = 0
 	rf.lastApplied = 0
 	rf.applyCh = applyCh
+
 	// log starts at index: 1, insert empty logEntry at index: 0
 	rf.log = append(rf.log, LogEntry{Index: 0, Term: NULL, Command: NULL})
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+
 	log.Printf("[System] server (id: %d) created, term: %d\n", rf.me, rf.currentTerm)
 	go rf.monitorHeartbeat()
 	return rf
@@ -175,10 +168,12 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
 	term = rf.currentTerm
 	isLeader = rf.state == Leader
 	rf.mu.Unlock()
+
 	if isLeader {
-		rf.mu.Lock() // todo:????
+		rf.mu.Lock()
 		rf.log = append(rf.log, LogEntry{Index: index, Term: term, Command: command})
 		rf.mu.Unlock()
+
 		log.Printf("[System] leader (id: %d) recv client req, append to log index: %d, command: %v\n", rf.me, index, command)
 		rf.leaderCh <- RestartTimer
 	}
@@ -207,17 +202,14 @@ func (rf *Raft) killed() bool {
 }
 
 // return currentTerm and whether this server
-// believes it is the leader. // todo: check
-func (rf *Raft) GetState() (int, bool) {
-	var term int
-	var isleader bool
-
+// believes it is the leader.
+func (rf *Raft) GetState() (term int, isLeader bool) {
 	rf.mu.Lock()
 	term = rf.currentTerm
-	isleader = rf.state == Leader
+	isLeader = rf.state == Leader
 	rf.mu.Unlock()
 
-	return term, isleader
+	return
 }
 
 // save Raft's persistent state to stable storage,
@@ -262,19 +254,18 @@ func (rf *Raft) readPersist(data []byte) {
 *****************************************************/
 
 type RequestVoteArgs struct {
-	// Your data here (2A, 2B).
 	Term         int
 	CandidateId  int
-	LastLogIndex int // todo: 2B
-	LastLogTerm  int // todo: 2B
+	LastLogIndex int
+	LastLogTerm  int
 }
 
 type RequestVoteReply struct {
-	// Your data here (2A).
 	Term        int
 	VoteGranted bool
 }
 
+// sendRequestVote make RPC call to ask peers to vote
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
@@ -285,6 +276,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) { //
 	term, candId, candlastLogIndex, candlastLogTerm := args.Term, args.CandidateId, args.LastLogIndex, args.LastLogTerm
 
 	rf.mu.Lock()
+	// invalid RPC: refuse vote
 	if term < rf.currentTerm {
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
@@ -371,12 +363,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) { //
 *****************************************************/
 
 type AppendEntriesArgs struct {
-	Term         int        `json:"term"`
-	LeaderId     int        `json:"leaderId"`
-	PrevLogIndex int        `json:"prevLogIndex"`
-	PrevLogTerm  int        `json:"prevLogTerm"`
-	Entries      []LogEntry `json:"entries"` // todo: ptr?
-	LeaderCommit int        `json:"leaderCommit"`
+	Term         int
+	LeaderId     int
+	PrevLogIndex int
+	PrevLogTerm  int
+	Entries      []LogEntry
+	LeaderCommit int
 }
 
 type AppendEntriesReply struct {
@@ -450,14 +442,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// update commitIndex // todo:check
 	rf.mu.Lock()
-	if leaderCommit > rf.commitIdx {
+	if leaderCommit > rf.commitIndex {
 		min := math.Min(float64(leaderCommit), float64(rf.log[len(rf.log)-1].Index))
-		rf.commitIdx = int(min)
-		log.Printf("[AE] server (id: %d) update commitIdx as %d\n", rf.me, rf.commitIdx)
+		rf.commitIndex = int(min)
+		log.Printf("[AE] server (id: %d) update commitIndex as %d\n", rf.me, rf.commitIndex)
 		// apply to state machine
-		if rf.commitIdx > rf.lastApplied {
+		if rf.commitIndex > rf.lastApplied {
 			start := rf.lastApplied + 1
-			end := rf.commitIdx + 1
+			end := rf.commitIndex + 1
 			for i := start; i < end; i++ {
 				logEntry := rf.log[i]
 				rf.applyCh <- ApplyMsg{Command: logEntry.Command, CommandIndex: i, CommandValid: true}
@@ -508,6 +500,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 /******************************************************
 ** Helper
 *****************************************************/
+
 // changeToFollower updates term, set state follower, . requires locking mechanism
 // todo: timer restart timer
 func (rf *Raft) changeToFollower(term int) {
@@ -518,7 +511,7 @@ func (rf *Raft) changeToFollower(term int) {
 
 }
 
-func (rf *Raft) startTimer(quit chan ChanArg, ch chan ChanArg, isHeartbeat bool) {
+func (rf *Raft) startTimer(quit chan chanArg, ch chan chanArg, isHeartbeat bool) {
 	var dur time.Duration
 	if isHeartbeat {
 		dur = 100 * time.Millisecond
@@ -531,7 +524,7 @@ func (rf *Raft) startTimer(quit chan ChanArg, ch chan ChanArg, isHeartbeat bool)
 	case <-quit:
 		return
 	default:
-		ch <- Timeout // todo: ptr
+		ch <- Timeout
 	}
 }
 
@@ -539,21 +532,23 @@ func (rf *Raft) startTimer(quit chan ChanArg, ch chan ChanArg, isHeartbeat bool)
 ** Follower: monitorHB
 *****************************************************/
 func (rf *Raft) monitorHeartbeat() {
-	//if rf.killed() {
-	//	return
-	//}
 	// 2A
-	rf.timerCh = make(chan ChanArg) // todo: rename
 	log.Printf("[MonitorHB] server (id: %d) starts monitor heartbeat\n", rf.me)
-	quit := make(chan ChanArg, 1)
+
+	rf.timerCh = make(chan chanArg) // todo: rename
+
+	quit := make(chan chanArg, 1)
 	go rf.startTimer(quit, rf.timerCh, false)
 
+	// two cases:
+	// (1) receive "RestartTimer" first (pushed from valid RequestVote RPC or valid AppendEntry RPC) => restart timer
+	// (2) receive "Timeout" first (pushed from rf.timerCh) => change to candidate & start election
 	for !rf.killed() {
 		arg := <-rf.timerCh
 		if arg == RestartTimer {
+			log.Printf("[MonitorHB] server (id: %d) recv valid RPC, restart timer", rf.me)
 			quit <- QuitTimer
-			log.Printf("[MonitorHB] server (id: %d) recv RPC, restart timer", rf.me)
-			quit = make(chan ChanArg, 1)
+			quit = make(chan chanArg, 1)
 			go rf.startTimer(quit, rf.timerCh, false)
 		} else {
 			log.Printf("[MonitorHB] server (id: %d) timeout, changed to candidate and start election", rf.me)
@@ -568,7 +563,6 @@ func (rf *Raft) monitorHeartbeat() {
 *****************************************************/
 
 func (rf *Raft) issueOneReqVote(i int) {
-
 	// wrap arg, reply,
 	rf.mu.Lock()
 	if rf.state != Candidate {
@@ -612,12 +606,13 @@ func (rf *Raft) startElection() {
 		rf.state = Candidate
 		rf.currentTerm = rf.currentTerm + 1
 		rf.votedFor = rf.me
-		// clear electCh, to prevent counting votes from previous round // todo
-		rf.electCh = make(chan ChanArg, len(rf.peers)+1)
 		rf.mu.Unlock()
 
+		// clear electCh, to prevent counting votes from previous round
+		rf.electCh = make(chan chanArg, len(rf.peers)+1)
+
 		// fire timer
-		quit := make(chan ChanArg, 1)
+		quit := make(chan chanArg, 1)
 		go rf.startTimer(quit, rf.electCh, false)
 
 		// fire reqVote
@@ -651,7 +646,7 @@ func (rf *Raft) startElection() {
 ** Leader: issueHB
 *****************************************************/
 func (rf *Raft) issueOneHeartbeat(i int, isHeartbeat bool) { // todo: create AEType enum
-	// wrap arg, ply
+	// wrap arg, reply
 	rf.mu.Lock() // tod
 	if rf.state != Leader {
 		rf.mu.Unlock()
@@ -664,10 +659,9 @@ func (rf *Raft) issueOneHeartbeat(i int, isHeartbeat bool) { // todo: create AET
 		LeaderId:     rf.me,
 		PrevLogIndex: prevLogIndex,
 		PrevLogTerm:  rf.log[prevLogIndex].Term,
-		//Entries:      rf.log[rf.nextIndex[i]:], // todo
-		LeaderCommit: rf.commitIdx,
+		LeaderCommit: rf.commitIndex,
 	}
-	//fmt.Printf("%+v\n", arg)
+
 	if isHeartbeat {
 		arg.Entries = []LogEntry{}
 		log.Printf("[IssueHB] leader (id: %d) issue heatbeat to %d\n", rf.me, i)
@@ -708,7 +702,7 @@ func (rf *Raft) issueOneHeartbeat(i int, isHeartbeat bool) { // todo: create AET
 			// log inconsistency
 			rf.nextIndex[i] = nextIndex - 1
 			// retry
-			go rf.issueOneHeartbeat(i, isHeartbeat) // <----todo: can remove isHeartBeat
+			go rf.issueOneHeartbeat(i, isHeartbeat)
 			rf.mu.Unlock()
 			return
 		}
@@ -732,19 +726,18 @@ func (rf *Raft) issueOneHeartbeat(i int, isHeartbeat bool) { // todo: create AET
 func (rf *Raft) issueHeartbeat() { // todo: rename
 	rf.mu.Lock()
 	rf.state = Leader
-	// we don't want to read req of previous leader round // todo: does monitorHB needs this?
-	rf.leaderCh = make(chan ChanArg)
+	// we don't want to read req of previous leader round
+	rf.leaderCh = make(chan chanArg)
 	rf.nextIndex = make([]int, len(rf.peers)) // todo: need lock?
 	rf.matchIndex = make([]int, len(rf.peers))
 	for i := range rf.nextIndex {
 		rf.nextIndex[i] = len(rf.log)
 	}
 	rf.mu.Unlock()
-	//time.Sleep(150 * time.Millisecond)
 
-	quit := make(chan ChanArg, 1)
+	quit := make(chan chanArg, 1)
 	go rf.startTimer(quit, rf.leaderCh, true)
-	//rf.mu.Lock()
+
 	//for rf.state == Leader && !rf.killed() {
 	for !rf.killed() {
 		var isHeartbeat bool
@@ -763,14 +756,13 @@ func (rf *Raft) issueHeartbeat() { // todo: rename
 
 		for i := range rf.peers {
 			go rf.issueOneHeartbeat(i, isHeartbeat) // todo: rename // lock here?
-			//go rf.issueOneHeartbeat(i) // todo: rename
 		}
-		quit = make(chan ChanArg, 1)
+		quit = make(chan chanArg, 1)
 		go rf.startTimer(quit, rf.leaderCh, true)
-		// update commitIdx // todo: check (thread?) // todo: uncomment
 
+		// update commitIndex // todo: check (thread?) // todo: uncomment
 		rf.mu.Lock()
-		fmt.Println("Updating commitIdx")
+		fmt.Println("Updating commitIndex")
 		stat := make([]int, len(rf.log))
 		for i, s := range rf.matchIndex {
 			fmt.Printf("ocunt stat, server: %d, matchOdx: %d\n", i, s)
@@ -782,16 +774,16 @@ func (rf *Raft) issueHeartbeat() { // todo: rename
 		// reverse loop to get biggest index that has majority
 		for i := len(rf.log) - 1; i >= 0; i-- {
 			count += stat[i]
-			if count >= majority && i > rf.commitIdx && rf.log[i].Term == rf.currentTerm {
-				rf.commitIdx = i
+			if count >= majority && i > rf.commitIndex && rf.log[i].Term == rf.currentTerm {
+				rf.commitIndex = i
 				break
 			}
 		}
-		log.Printf("[Commit] Leader (id: %d) update commitIdx as %d\n", rf.me, rf.commitIdx)
+		log.Printf("[Commit] Leader (id: %d) update commitIndex as %d\n", rf.me, rf.commitIndex)
 		// todo: this is entirely same as AE, but leader doesn't go thru AE so here is it!
-		if rf.commitIdx > rf.lastApplied {
+		if rf.commitIndex > rf.lastApplied {
 			start := rf.lastApplied + 1
-			end := rf.commitIdx + 1
+			end := rf.commitIndex + 1
 			for i := start; i < end; i++ {
 				logEntry := rf.log[i]
 				rf.applyCh <- ApplyMsg{Command: logEntry.Command, CommandIndex: i, CommandValid: true}
@@ -802,5 +794,4 @@ func (rf *Raft) issueHeartbeat() { // todo: rename
 		rf.mu.Unlock()
 
 	}
-	//rf.mu.Unlock()
 }
