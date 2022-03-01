@@ -65,6 +65,7 @@ type LogEntry struct {
 //
 // A Go object implementing a single Raft peer.
 //
+// Note1: There's no need for a "leaderId" field, since in this implementation, we won't redirect client's reqs to the leader
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access (goroutine) to this peer's state
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
@@ -78,7 +79,6 @@ type Raft struct {
 	// 2A
 	state       State
 	currentTerm int
-	leaderId    int        // for redirect client requests
 	votedFor    int        // candidateId that received my vote at this term
 	log         []LogEntry // todo: ptr
 	timerCh     chan ChanArg
@@ -136,7 +136,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.mu = sync.Mutex{} // todo: ptr
 	rf.state = Follower
 	rf.currentTerm = 0
-	rf.leaderId = NULL // todo:need?
 	rf.votedFor = NULL
 	rf.timerCh = make(chan ChanArg)                  // todo: rename
 	rf.electCh = make(chan ChanArg, len(rf.peers)+1) // +1: space for timer arg
@@ -198,7 +197,6 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
 // should call killed() to check whether it should stop.
 //
 func (rf *Raft) Kill() {
-	log.Printf("%d has been killed, isleader:%t", rf.me, rf.me == rf.leaderId)
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
 }
@@ -216,7 +214,7 @@ func (rf *Raft) GetState() (int, bool) {
 
 	rf.mu.Lock()
 	term = rf.currentTerm
-	isleader = rf.me == rf.leaderId
+	isleader = rf.state == Leader
 	rf.mu.Unlock()
 
 	return term, isleader
@@ -426,30 +424,29 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.leaderCh <- ChangeToFollower // use to shut down startElection goroutine todo: leaderCh shut down
 	}
 	rf.changeToFollower(term)
-	rf.leaderId = leaderId
 	rf.mu.Unlock()
 
 	// 2B:
 	// if isHeartbeat
-	if len(entries) == 0 {
-		reply.Success = true
+	rf.mu.Lock()
+	if prevLogIndex >= len(rf.log) || rf.log[prevLogIndex].Term != prevLogTerm {
+		log.Printf("[AE] server (id: %d) discover log inconsistency, refuse...\n", rf.me)
+		rf.mu.Unlock()
+		reply.Success = false
+		return
 	} else {
-		rf.mu.Lock()
-		if prevLogIndex >= len(rf.log) || rf.log[prevLogIndex].Term != prevLogTerm {
-			log.Printf("[AE] server (id: %d) discover log inconsistency, refuse...\n", rf.me)
-			reply.Success = false
-		} else {
-			// if new one conflicts with existing, delete existing (assume entries sorted with ascending order)
-			insertIndex := entries[0].Index
-			if len(rf.log) > insertIndex {
-				rf.log = rf.log[:insertIndex]
-			}
+		// if new one conflicts with existing, delete existing (assume entries sorted with ascending order)
+		insertIndex := prevLogIndex + 1
+		if len(rf.log) > insertIndex {
+			rf.log = rf.log[:insertIndex]
+		}
+		if len(entries) != 0 {
 			rf.log = append(rf.log, entries...)
 			log.Printf("[AE] server (id: %d) append log, current log as %v\n", rf.me, rf.log)
-			reply.Success = true
 		}
-		rf.mu.Unlock()
+		reply.Success = true
 	}
+	rf.mu.Unlock()
 
 	// update commitIndex // todo:check
 	rf.mu.Lock()
@@ -734,7 +731,6 @@ func (rf *Raft) issueOneHeartbeat(i int, isHeartbeat bool) { // todo: create AET
 
 func (rf *Raft) issueHeartbeat() { // todo: rename
 	rf.mu.Lock()
-	rf.leaderId = rf.me
 	rf.state = Leader
 	// we don't want to read req of previous leader round // todo: does monitorHB needs this?
 	rf.leaderCh = make(chan ChanArg)
