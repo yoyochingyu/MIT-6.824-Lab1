@@ -28,6 +28,7 @@ import (
 import "sync/atomic"
 import "../labrpc"
 
+//todo
 func init() {
 	rand.Seed(time.Now().UnixNano())
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
@@ -72,7 +73,7 @@ type Raft struct {
 	currentTerm int
 	votedFor    int // candidateId that received my vote at this term
 	log         []LogEntry
-	timerCh     chan chanArg // todo: rename
+	timerCh     chan chanArg // todo: rename // todo: three? unify as one?
 	electCh     chan chanArg // todo: rename
 	leaderCh    chan chanArg // todo: rename
 
@@ -86,7 +87,7 @@ type Raft struct {
 
 var NULL = -1
 
-type state string
+type state string // todo: // todo: capital case?
 
 var (
 	Follower  state = "FOLLOWER" // todo: capital case?
@@ -94,7 +95,7 @@ var (
 	Leader    state = "LEADER"
 )
 
-type chanArg string
+type chanArg string // todo
 
 var (
 	RestartTimer     chanArg = "RESTART_TIMER" // todo: capital case?
@@ -162,6 +163,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 // term. the third return value is true if this server believes it is
 // the leader.
 //
+//todo
 func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) {
 	rf.mu.Lock()
 	index = len(rf.log)
@@ -175,7 +177,7 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
 		rf.mu.Unlock()
 
 		log.Printf("[System] leader (id: %d) recv client req, append to log index: %d, command: %v\n", rf.me, index, command)
-		rf.leaderCh <- RestartTimer
+		rf.leaderCh <- RestartTimer // todo
 	}
 	return
 }
@@ -287,21 +289,19 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) { //
 
 	// change state
 	if term > rf.currentTerm {
-		if rf.state == Follower {
-			rf.changeToFollower(term) // todo: log
-			rf.votedFor = NULL
+		switch rf.state {
+		case Follower:
 			rf.timerCh <- RestartTimer
-			// todo: vote/checkvote
-		} else if rf.state == Candidate || rf.state == Leader {
-			if rf.state == Candidate {
-				rf.electCh <- ChangeToFollower
-			} else {
-				rf.leaderCh <- ChangeToFollower
-			}
-			rf.changeToFollower(term)
-			rf.votedFor = NULL
+		case Candidate:
+			rf.electCh <- ChangeToFollower
+			go rf.monitorHeartbeat() // todo: will this have the ones remaining when last time as follower?
+		case Leader:
+			rf.leaderCh <- ChangeToFollower
 			go rf.monitorHeartbeat() // todo: will this have the ones remaining when last time as follower?
 		}
+		rf.changeToFollower(term)
+		rf.votedFor = NULL
+
 	} else {
 		if rf.state == Follower {
 			rf.timerCh <- RestartTimer
@@ -329,32 +329,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) { //
 		reply.VoteGranted = false
 		log.Printf("[RefuseVote] server (id: %d) refuse vote to candidate (id: %d)\n", rf.me, candId)
 	}
-	// todo: votedFor set as null!
-
-	// original
-	//if term > rf.currentTerm {
-	//	// restart timer
-	//	rf.timerCh <- RestartTimer // todo: candidate, leader on't have this?
-	//
-	//	rf.changeToFollower(term)
-	//	//go rf.monitorHeartbeat() //todo: prob?
-	//
-	//	rf.votedFor = candidateId
-	//	reply.VoteGranted = true
-	//	log.Printf("[Server %d] votes for %d\n", rf.me, candidateId)
-	//} else {
-	//	// restart timer
-	//	rf.timerCh <- RestartTimer // todo: candidate, leader don't have this?
-	//
-	//	if rf.votedFor == NULL || rf.votedFor == candidateId { // todo: leader?
-	//		rf.votedFor = candidateId
-	//		reply.VoteGranted = true
-	//		log.Printf("[Server %d] votes for %d\n", rf.me, candidateId)
-	//	} else {
-	//		reply.VoteGranted = false
-	//	}
-	//
-	//}
 	rf.mu.Unlock()
 }
 
@@ -396,6 +370,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.mu.Unlock()
 		return
 	}
+	//todo
 	if term == rf.currentTerm && rf.state == Leader {
 		reply.Success = true //todo: check
 		rf.mu.Unlock()
@@ -403,23 +378,23 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	// change state, update term, restart timer, start monitorHB
-	if rf.state == Follower {
+	switch rf.state {
+	case Follower:
 		rf.timerCh <- RestartTimer
-	} else if rf.state == Candidate {
-		//todo: does this implicityly means voting to this leader????????? (set votedFor)
-		rf.votedFor = leaderId         //todo:?????????
-		go rf.monitorHeartbeat()       // todo: will this have the ones remaining when last time as follower?
+	case Candidate:
+		rf.votedFor = NULL             // todo: does this implicityly means voting to this leader????????? (set votedFor)
 		rf.electCh <- ChangeToFollower // use to shut down startElection goroutine
-	} else if rf.state == Leader {
-		rf.votedFor = leaderId          //todo:?????????
-		go rf.monitorHeartbeat()        // todo: will this have the ones remaining when last time as follower?
-		rf.leaderCh <- ChangeToFollower // use to shut down startElection goroutine todo: leaderCh shut down
+		go rf.monitorHeartbeat()       // todo: will this have the ones remaining when last time as follower?
+	case Leader:
+		rf.votedFor = NULL
+		rf.leaderCh <- ChangeToFollower
+		go rf.monitorHeartbeat() // todo: will this have the ones remaining when last time as follower?
 	}
 	rf.changeToFollower(term)
 	rf.mu.Unlock()
 
 	// 2B:
-	// if isHeartbeat
+	// todo: if isHeartbeat
 	rf.mu.Lock()
 	if prevLogIndex >= len(rf.log) || rf.log[prevLogIndex].Term != prevLogTerm {
 		log.Printf("[AE] server (id: %d) discover log inconsistency, refuse...\n", rf.me)
@@ -446,62 +421,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		min := math.Min(float64(leaderCommit), float64(rf.log[len(rf.log)-1].Index))
 		rf.commitIndex = int(min)
 		log.Printf("[AE] server (id: %d) update commitIndex as %d\n", rf.me, rf.commitIndex)
-		// apply to state machine
-		if rf.commitIndex > rf.lastApplied {
-			start := rf.lastApplied + 1
-			end := rf.commitIndex + 1
-			for i := start; i < end; i++ {
-				logEntry := rf.log[i]
-				rf.applyCh <- ApplyMsg{Command: logEntry.Command, CommandIndex: i, CommandValid: true}
-				rf.lastApplied++
-			}
-			log.Printf("[AE] server (id: %d) applies index: %d~%d, updates lastApplied to %d\n", rf.me, start, end-1, rf.lastApplied)
-		}
-		fmt.Println(rf.log)
+		go rf.apply()
 	}
 	rf.mu.Unlock()
-
-	// detailed version
-	//if term > rf.currentTerm{
-	//	if rf.state == Follower{
-	//		rf.changeToFollower(term)
-	//		rf.leaderId = leaderId
-	//		rf.timerCh <- RestartTimer
-	//	}else if rf.state == Candidate{
-	//		rf.changeToFollower(term)
-	//		rf.leaderId = leaderId
-	//		go rf.monitorHeartbeat() // todo: will this have the ones remaining when last time as follower?
-	//	}
-	//	// leader won't send AE to self
-	//}else if term == rf.currentTerm{
-	//	if rf.state == Follower{
-	//		rf.leaderId = leaderId
-	//		rf.timerCh <- RestartTimer
-	//	}else if rf.state == Candidate{
-	//		rf.changeToFollower(term)
-	//		rf.leaderId = leaderId
-	//		go rf.monitorHeartbeat() // todo: will this have the ones remaining when last time as follower?
-	//	}
-	// todo: leader won't send AE to self
-	//}
-	//
-
-	// original version
-	//if term > rf.currentTerm || rf.state == Candidate {
-	//	rf.changeToFollower(term)
-	//}
-	//if rf.state != Leader {
-	//	rf.leaderId = leaderId
-	//	rf.timerCh <- RestartTimer // todo: position? leader/follower
-	//}
-
 }
 
 /******************************************************
 ** Helper
 *****************************************************/
 
-// changeToFollower updates term, set state follower, . requires locking mechanism
+// changeToFollower updates term, set state follower, requires locking mechanism
 // todo: timer restart timer
 func (rf *Raft) changeToFollower(term int) {
 	log.Printf("[System] server (id: %d) state: %s, term: %d->%d\n", rf.me, Follower, rf.currentTerm, term)
@@ -526,6 +455,21 @@ func (rf *Raft) startTimer(quit chan chanArg, ch chan chanArg, isHeartbeat bool)
 	default:
 		ch <- Timeout
 	}
+}
+
+// apply logs to state machine, requires locking
+func (rf *Raft) apply() {
+	if rf.commitIndex > rf.lastApplied {
+		start := rf.lastApplied + 1
+		end := rf.commitIndex + 1
+		for i := start; i < end; i++ {
+			logEntry := rf.log[i]
+			rf.applyCh <- ApplyMsg{Command: logEntry.Command, CommandIndex: logEntry.Index, CommandValid: true}
+			rf.lastApplied++
+		}
+		log.Printf("[AE] server (id: %d) applies index: %d~%d, updates lastApplied to %d\n", rf.me, start, end-1, rf.lastApplied)
+	}
+
 }
 
 /******************************************************
@@ -617,7 +561,7 @@ func (rf *Raft) startElection() {
 
 		// fire reqVote
 		for i := range rf.peers {
-			go rf.issueOneReqVote(i) // todo: rename
+			go rf.issueOneReqVote(i)
 		}
 
 		// wait for signal
@@ -735,6 +679,11 @@ func (rf *Raft) issueHeartbeat() { // todo: rename
 	}
 	rf.mu.Unlock()
 
+	// initial heartbeat to preserve authority
+	for i := range rf.peers {
+		go rf.issueOneHeartbeat(i, true) //todo lock here?
+	}
+
 	quit := make(chan chanArg, 1)
 	go rf.startTimer(quit, rf.leaderCh, true)
 
@@ -755,7 +704,7 @@ func (rf *Raft) issueHeartbeat() { // todo: rename
 		}
 
 		for i := range rf.peers {
-			go rf.issueOneHeartbeat(i, isHeartbeat) // todo: rename // lock here?
+			go rf.issueOneHeartbeat(i, isHeartbeat) //todo lock here?
 		}
 		quit = make(chan chanArg, 1)
 		go rf.startTimer(quit, rf.leaderCh, true)
@@ -765,7 +714,7 @@ func (rf *Raft) issueHeartbeat() { // todo: rename
 		fmt.Println("Updating commitIndex")
 		stat := make([]int, len(rf.log))
 		for i, s := range rf.matchIndex {
-			fmt.Printf("ocunt stat, server: %d, matchOdx: %d\n", i, s)
+			fmt.Printf("count stat, server: %d, matchIdx: %d\n", i, s)
 			stat[s]++
 		}
 
@@ -780,18 +729,8 @@ func (rf *Raft) issueHeartbeat() { // todo: rename
 			}
 		}
 		log.Printf("[Commit] Leader (id: %d) update commitIndex as %d\n", rf.me, rf.commitIndex)
-		// todo: this is entirely same as AE, but leader doesn't go thru AE so here is it!
-		if rf.commitIndex > rf.lastApplied {
-			start := rf.lastApplied + 1
-			end := rf.commitIndex + 1
-			for i := start; i < end; i++ {
-				logEntry := rf.log[i]
-				rf.applyCh <- ApplyMsg{Command: logEntry.Command, CommandIndex: i, CommandValid: true}
-				rf.lastApplied++
-			}
-			log.Printf("[AE] server (id: %d) applies index: %d~%d, updates lastApplied to %d\n", rf.me, start, end-1, rf.lastApplied)
-		}
 		rf.mu.Unlock()
+		go rf.apply()
 
 	}
 }
