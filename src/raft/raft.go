@@ -288,10 +288,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) { //
 	}
 
 	// change state
+	prevIsFollower := false
 	if term > rf.currentTerm {
 		switch rf.state {
 		case Follower:
-			rf.timerCh <- RestartTimer
+			prevIsFollower = true
+		//	rf.timerCh <- RestartTimer
 		case Candidate:
 			rf.electCh <- ChangeToFollower
 			go rf.monitorHeartbeat() // todo: will this have the ones remaining when last time as follower?
@@ -302,13 +304,16 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) { //
 		rf.changeToFollower(term)
 		rf.votedFor = NULL
 
-	} else {
-		if rf.state == Follower {
-			rf.timerCh <- RestartTimer
-		}
-		// leader and candidate can just refuse voting
 	}
+	rf.mu.Unlock()
+	//else {
+	//	if rf.state == Follower {
+	//		rf.timerCh <- RestartTimer
+	//	}
+	//	//leader and candidate can just refuse voting
+	//}
 	// check whether I can vote this guy
+	rf.mu.Lock()
 	isCandidateUptoDate := false
 	lastLogIndex := len(rf.log) - 1
 	if candlastLogTerm != rf.log[lastLogIndex].Term {
@@ -324,6 +329,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) { //
 	if (rf.votedFor == NULL || rf.votedFor == candId) && isCandidateUptoDate {
 		rf.votedFor = candId
 		reply.VoteGranted = true
+		if prevIsFollower {
+			rf.timerCh <- RestartTimer
+		}
 		log.Printf("[GrantVote] server (id: %d) votes for candidate (id: %d), votedFor: %v, isCandidateUpToDate: %t\n", rf.me, candId, rf.votedFor, isCandidateUptoDate)
 	} else {
 		reply.VoteGranted = false
@@ -397,22 +405,27 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// todo: if isHeartbeat
 	rf.mu.Lock()
 	if prevLogIndex >= len(rf.log) || rf.log[prevLogIndex].Term != prevLogTerm {
-		log.Printf("[AE] server (id: %d) discover log inconsistency, refuse...\n", rf.me)
-		rf.mu.Unlock()
 		reply.Success = false
+		reply.Term = rf.currentTerm
+		rf.mu.Unlock()
+		log.Printf("[AE] server (id: %d) discover log inconsistency, refuse...\n", rf.me) // todo: drop
 		return
-	} else {
-		// if new one conflicts with existing, delete existing (assume entries sorted with ascending order)
-		insertIndex := prevLogIndex + 1
-		if len(rf.log) > insertIndex {
-			rf.log = rf.log[:insertIndex]
-		}
-		if len(entries) != 0 {
-			rf.log = append(rf.log, entries...)
-			log.Printf("[AE] server (id: %d) append log, current log as %v\n", rf.me, rf.log)
-		}
-		reply.Success = true
 	}
+	// if new one conflicts with existing, delete existing
+	index := 0
+	for i, e := range entries {
+		if len(rf.log) > e.Index && rf.log[e.Index].Term != e.Term {
+			rf.log = rf.log[:e.Index]
+			index = i
+			break
+		}
+	}
+	if len(entries) != 0 {
+		rf.log = append(rf.log, entries[index:]...)
+		log.Printf("[AE] server (id: %d) append log, current log as %v\n", rf.me, rf.log)
+	}
+	reply.Success = true
+
 	rf.mu.Unlock()
 
 	// update commitIndex // todo:check
@@ -421,7 +434,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		min := math.Min(float64(leaderCommit), float64(rf.log[len(rf.log)-1].Index))
 		rf.commitIndex = int(min)
 		log.Printf("[AE] server (id: %d) update commitIndex as %d\n", rf.me, rf.commitIndex)
-		go rf.apply()
+		go rf.apply() // todo
 	}
 	rf.mu.Unlock()
 }
@@ -457,19 +470,15 @@ func (rf *Raft) startTimer(quit chan chanArg, ch chan chanArg, isHeartbeat bool)
 	}
 }
 
-// apply logs to state machine, requires locking
+// apply logs to state machine
 func (rf *Raft) apply() {
+	rf.mu.Lock()
 	if rf.commitIndex > rf.lastApplied {
-		start := rf.lastApplied + 1
-		end := rf.commitIndex + 1
-		for i := start; i < end; i++ {
-			logEntry := rf.log[i]
-			rf.applyCh <- ApplyMsg{Command: logEntry.Command, CommandIndex: logEntry.Index, CommandValid: true}
-			rf.lastApplied++
-		}
-		log.Printf("[AE] server (id: %d) applies index: %d~%d, updates lastApplied to %d\n", rf.me, start, end-1, rf.lastApplied)
+		rf.lastApplied++
+		rf.applyCh <- ApplyMsg{Command: rf.log[rf.lastApplied].Command, CommandIndex: rf.log[rf.lastApplied].Index, CommandValid: true}
+		log.Printf("[AE] server (id: %d) applies index: %d, updates lastApplied to %d\n", rf.me, rf.lastApplied, rf.lastApplied)
 	}
-
+	rf.mu.Unlock()
 }
 
 /******************************************************
@@ -657,7 +666,7 @@ func (rf *Raft) issueOneHeartbeat(i int, isHeartbeat bool) { // todo: create AET
 			// todo: succeed means that it finds the last matched and attach all entries to it
 			// we can't just say nextIdx = len(rf.log), bcuz leader may have append a new log entry
 			rf.nextIndex[i] = nextIndex + len(arg.Entries)
-			rf.matchIndex[i] = rf.nextIndex[i] - 1
+			rf.matchIndex[i] = prevLogIndex + len(arg.Entries)
 			log.Printf("[IssueAE] AE to %d succeeds,update nextIdx: %d, matchIdx: %d", i, rf.nextIndex[i], rf.matchIndex[i])
 			rf.mu.Unlock()
 			// todo: log successfully AE
