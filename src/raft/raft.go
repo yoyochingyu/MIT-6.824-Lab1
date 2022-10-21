@@ -487,9 +487,9 @@ func (rf *Raft) apply() {
 func (rf *Raft) monitorHeartbeat() {
 	// 2A
 	log.Printf("[MonitorHB] server (id: %d) starts monitor heartbeat\n", rf.me)
-
+	//rf.mu.Lock()
 	rf.timerCh = make(chan chanArg) // todo: rename
-
+	//rf.mu.Unlock()
 	quit := make(chan chanArg, 1)
 	go rf.startTimer(quit, rf.timerCh, false)
 
@@ -539,7 +539,7 @@ func (rf *Raft) issueOneReqVote(i int) {
 	// handle response
 	term, voteGranted := reply.Term, reply.VoteGranted
 	rf.mu.Lock()
-	if rf.state == Candidate {
+	if rf.state == Candidate && rf.currentTerm == arg.Term {
 		if !voteGranted && term > rf.currentTerm {
 			rf.changeToFollower(term)
 			rf.votedFor = NULL
@@ -638,6 +638,7 @@ func (rf *Raft) issueOneHeartbeat(i int, isHeartbeat bool) { // todo: create AET
 	}
 	// handle response
 	term, success := reply.Term, reply.Success
+
 	if !success {
 		rf.mu.Lock()
 		if term > rf.currentTerm {

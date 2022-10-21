@@ -66,34 +66,33 @@ func TestReElection2A(t *testing.T) {
 	cfg.disconnect(leader1)
 	log.Printf("leader %d dies", leader1)
 	cfg.checkOneLeader()
-	//log.Printf("[1. checkOneLeader]ll: %d\n", ll)
+	log.Printf("[1. checkOneLeader]\n")
 
 	// if the old leader rejoins, that shouldn't
 	// disturb the new leader.
 	cfg.connect(leader1)
-	//log.Println("[2. checkOneLeader]") // todo: broke
 	leader2 := cfg.checkOneLeader()
+	log.Println("[2. checkOneLeader]") // todo: broke
 
 	// if there's no quorum, no leader should
 	// be elected.
 	cfg.disconnect(leader2)
 	cfg.disconnect((leader2 + 1) % servers)
-	//log.Println("closed", leader2)
-	//log.Println("closed", (leader2+1)%servers)
+	log.Println("closed", leader2)
+	log.Println("closed", (leader2+1)%servers)
 	time.Sleep(2 * RaftElectionTimeout)
-	//log.Println("[3. checkNoLeader]") // 1. claim itself as leader
 	cfg.checkNoLeader()
+	log.Println("[3. checkNoLeader]", "clse", leader2, (leader2+1)%servers) // 1. claim itself as leader
 
 	// if a quorum arises, it should elect a leader.
 	cfg.connect((leader2 + 1) % servers)
-	//log.Println("[4. checkOneLeader]")
 	cfg.checkOneLeader()
+	log.Println("[4. checkOneLeader]")
 
 	// re-join of last node shouldn't prevent leader from existing.
 	cfg.connect(leader2)
-	//log.Println("[5. checkOneLeader]") // todo: broke
 	cfg.checkOneLeader()
-	//log.Println("[end]")
+	log.Println("[5. checkOneLeader]") // todo: broke
 	cfg.end()
 }
 
@@ -203,6 +202,7 @@ func TestFailNoAgree2B(t *testing.T) {
 	cfg.disconnect((leader + 1) % servers)
 	cfg.disconnect((leader + 2) % servers)
 	cfg.disconnect((leader + 3) % servers)
+	fmt.Printf("Disconnect %d, %d, %d\n", (leader+1)%servers, (leader+2)%servers, (leader+3)%servers)
 
 	index, _, ok := cfg.rafts[leader].Start(20)
 	if ok != true {
@@ -218,7 +218,8 @@ func TestFailNoAgree2B(t *testing.T) {
 	if n > 0 {
 		t.Fatalf("%v committed but no majority", n)
 	}
-
+	//todo<---above good
+	fmt.Printf("CONNECTSSSSS HERE!!!!!")
 	// repair
 	cfg.connect((leader + 1) % servers)
 	cfg.connect((leader + 2) % servers)
@@ -227,6 +228,8 @@ func TestFailNoAgree2B(t *testing.T) {
 	// the disconnected majority may have chosen a leader from
 	// among their own ranks, forgetting index 2.
 	leader2 := cfg.checkOneLeader()
+	fmt.Printf("DID I PASS HERE?\n")
+	fmt.Printf("leader is %d\n", leader2)
 	index2, _, ok2 := cfg.rafts[leader2].Start(30)
 	if ok2 == false {
 		t.Fatalf("leader2 rejected Start()")
@@ -370,11 +373,13 @@ func TestRejoin2B(t *testing.T) {
 	cfg.connect(leader1)
 
 	cfg.one(104, 2, true)
+	fmt.Println("checkpoint3") // todo: error
 
 	// all together now
 	cfg.connect(leader2)
 
 	cfg.one(105, servers, true)
+	fmt.Println("checkpoint4")
 
 	cfg.end()
 }
@@ -388,7 +393,7 @@ func TestBackup2B(t *testing.T) {
 
 	cfg.one(rand.Int(), servers, true)
 
-	// put leader and one follower in a partition
+	// put leader and one follower in a partition (only leader & one follower is up)
 	leader1 := cfg.checkOneLeader()
 	cfg.disconnect((leader1 + 2) % servers)
 	cfg.disconnect((leader1 + 3) % servers)
@@ -401,6 +406,7 @@ func TestBackup2B(t *testing.T) {
 
 	time.Sleep(RaftElectionTimeout / 2)
 
+	// disconnect the alive leader and the alive follower
 	cfg.disconnect((leader1 + 0) % servers)
 	cfg.disconnect((leader1 + 1) % servers)
 
@@ -413,9 +419,11 @@ func TestBackup2B(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		cfg.one(rand.Int(), 3, true)
 	}
+	fmt.Println("checkpointttt1")
 
 	// now another partitioned leader and one follower
 	leader2 := cfg.checkOneLeader()
+	fmt.Println("checkpointttt2")
 	other := (leader1 + 2) % servers
 	if leader2 == other {
 		other = (leader2 + 1) % servers
@@ -426,6 +434,7 @@ func TestBackup2B(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		cfg.rafts[leader2].Start(rand.Int())
 	}
+	fmt.Println("checkpointttt3")
 
 	time.Sleep(RaftElectionTimeout / 2)
 
@@ -441,17 +450,19 @@ func TestBackup2B(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		cfg.one(rand.Int(), 3, true)
 	}
-
+	fmt.Println("checkpointttt4")
 	// now everyone
 	for i := 0; i < servers; i++ {
 		cfg.connect(i)
 	}
 	cfg.one(rand.Int(), servers, true)
+	fmt.Println("checkpointttt5")
 
 	cfg.end()
 }
 
 func TestCount2B(t *testing.T) {
+	time.Sleep(3 * time.Second)
 	servers := 3
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
